@@ -1,285 +1,215 @@
-import { useState, useEffect } from 'react'
+import { useState, useRef } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Badge } from '@/components/ui/badge'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
-import { Label } from '@/components/ui/label'
-import { Search, Settings, Package, AlertTriangle, TrendingUp, CheckCircle } from 'lucide-react'
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Upload, FileSpreadsheet, CheckCircle, AlertCircle } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 
-const STATUS_CONFIG = {
-  critico: { 
-    label: 'Crítico', 
-    color: 'bg-red-100 text-red-800 border-red-200',
-    icon: AlertTriangle,
-    iconColor: 'text-red-600'
-  },
-  baixo: { 
-    label: 'Baixo', 
-    color: 'bg-orange-100 text-orange-800 border-orange-200',
-    icon: TrendingUp,
-    iconColor: 'text-orange-600'
-  },
-  atencao: { 
-    label: 'Atenção', 
-    color: 'bg-yellow-100 text-yellow-800 border-yellow-200',
-    icon: Package,
-    iconColor: 'text-yellow-600'
-  },
-  ok: { 
-    label: 'OK', 
-    color: 'bg-green-100 text-green-800 border-green-200',
-    icon: CheckCircle,
-    iconColor: 'text-green-600'
-  }
-}
+export default function UploadComponent({ onUploadSuccess }) {
+  const [uploading, setUploading] = useState(false)
+  const [message, setMessage] = useState(null)
+  const [dragActive, setDragActive] = useState(false)
+  const fileInputRef = useRef(null)
 
-export default function Produtos() {
-  const [produtos, setProdutos] = useState([])
-  const [loading, setLoading] = useState(true)
-  const [filtro, setFiltro] = useState('')
-  const [statusFiltro, setStatusFiltro] = useState('todos')
-  const [produtoEditando, setProdutoEditando] = useState(null)
-  const [novoNivelMinimo, setNovoNivelMinimo] = useState('')
-
-  useEffect(() => {
-    carregarProdutos()
-  }, [])
-
-  const carregarProdutos = async () => {
+  const processarPlanilha = async (file) => {
     try {
-      setLoading(true)
+      setUploading(true)
+      setMessage(null)
+
+      if (!file.name.match(/\.(xlsx|xls)$/)) {
+        throw new Error('Por favor, selecione um arquivo Excel (.xlsx ou .xls)')
+      }
+
+      const arrayBuffer = await file.arrayBuffer()
+      const XLSX = await import('xlsx')
       
-      const { data, error } = await supabase
-        .from('produtos')
-        .select('*')
-        .order('codigo')
+      const workbook = XLSX.read(arrayBuffer, { type: 'array' })
+      const sheetName = workbook.SheetNames[0]
+      const worksheet = workbook.Sheets[sheetName]
+      const data = XLSX.utils.sheet_to_json(worksheet)
+
+      if (data.length === 0) {
+        throw new Error('A planilha está vazia')
+      }
+
+      const requiredColumns = ['Produto', 'Descrição do produto', 'Disponível', 'A caminho']
+      const firstRow = data[0]
+      const missingColumns = requiredColumns.filter(col => !(col in firstRow))
       
-      if (error) throw error
+      if (missingColumns.length > 0) {
+        throw new Error(`Colunas obrigatórias não encontradas: ${missingColumns.join(', ')}`)
+      }
 
-      const produtosComStatus = (data || []).map(produto => {
-        const estoque_total = (produto.disponivel || 0) + (produto.a_caminho || 0)
-        let status = 'ok'
-        
-        if (estoque_total <= 0) {
-          status = 'critico'
-        } else if (estoque_total <= produto.nivel_minimo) {
-          status = 'baixo'
-        } else if (estoque_total <= produto.nivel_minimo * 1.5) {
-          status = 'atencao'
-        }
+      const produtos = data.map(row => ({
+        codigo: String(row['Produto'] || '').trim(),
+        descricao: String(row['Descrição do produto'] || '').trim(),
+        disponivel: parseInt(row['Disponível']) || 0,
+        a_caminho: parseInt(row['A caminho']) || 0,
+        nivel_minimo: 5
+      })).filter(produto => produto.codigo && produto.descricao)
 
-        const sugestao_compra = status === 'critico' || status === 'baixo' 
-          ? Math.max(0, produto.nivel_minimo + Math.max(5, Math.floor(produto.nivel_minimo * 0.5)) - estoque_total)
-          : 0
+      if (produtos.length === 0) {
+        throw new Error('Nenhum produto válido encontrado na planilha')
+      }
 
-        return {
-          ...produto,
-          estoque_total,
-          status,
-          sugestao_compra
-        }
-      })
-
-      setProdutos(produtosComStatus)
-    } catch (error) {
-      console.error('Erro ao carregar produtos:', error)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const atualizarNivelMinimo = async () => {
-    if (!produtoEditando || !novoNivelMinimo) return
-
-    try {
       const { error } = await supabase
         .from('produtos')
-        .update({ nivel_minimo: parseInt(novoNivelMinimo) })
-        .eq('id', produtoEditando.id)
+        .upsert(produtos, {
+          onConflict: 'codigo',
+          ignoreDuplicates: false
+        })
 
       if (error) throw error
 
-      await carregarProdutos()
-      setProdutoEditando(null)
-      setNovoNivelMinimo('')
+      setMessage({
+        type: 'success',
+        text: `Planilha processada com sucesso! ${produtos.length} produtos importados/atualizados.`
+      })
+
+      if (onUploadSuccess) {
+        onUploadSuccess()
+      }
+
     } catch (error) {
-      console.error('Erro ao atualizar nível mínimo:', error)
+      console.error('Erro ao processar planilha:', error)
+      setMessage({
+        type: 'error',
+        text: error.message || 'Erro ao processar a planilha'
+      })
+    } finally {
+      setUploading(false)
     }
   }
 
-  const produtosFiltrados = produtos.filter(produto => {
-    const matchFiltro = produto.codigo.toLowerCase().includes(filtro.toLowerCase()) ||
-                       produto.descricao.toLowerCase().includes(filtro.toLowerCase())
-    
-    const matchStatus = statusFiltro === 'todos' || produto.status === statusFiltro
-    
-    return matchFiltro && matchStatus
-  })
+  const handleDrag = (e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    if (e.type === 'dragenter' || e.type === 'dragover') {
+      setDragActive(true)
+    } else if (e.type === 'dragleave') {
+      setDragActive(false)
+    }
+  }
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-teal-600"></div>
-      </div>
-    )
+  const handleDrop = (e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setDragActive(false)
+    
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      processarPlanilha(e.dataTransfer.files[0])
+    }
+  }
+
+  const handleFileSelect = (e) => {
+    if (e.target.files && e.target.files[0]) {
+      processarPlanilha(e.target.files[0])
+    }
+  }
+
+  const openFileDialog = () => {
+    fileInputRef.current?.click()
   }
 
   return (
     <div className="space-y-6">
-      {/* Filtros */}
       <Card>
         <CardHeader>
-          <CardTitle>Filtros</CardTitle>
-          <CardDescription>Busque e filtre produtos por código, descrição ou status</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="flex flex-col md:flex-row gap-4">
-            <div className="flex-1">
-              <div className="relative">
-                <Search className="absolute left-3 top-3 h-4 w-4 text-gray-400" />
-                <Input
-                  placeholder="Buscar por código ou descrição..."
-                  value={filtro}
-                  onChange={(e) => setFiltro(e.target.value)}
-                  className="pl-10"
-                />
-              </div>
-            </div>
-            <div className="w-full md:w-48">
-              <Select value={statusFiltro} onValueChange={setStatusFiltro}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Filtrar por status" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="todos">Todos os status</SelectItem>
-                  <SelectItem value="critico">Crítico</SelectItem>
-                  <SelectItem value="baixo">Baixo</SelectItem>
-                  <SelectItem value="atencao">Atenção</SelectItem>
-                  <SelectItem value="ok">OK</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Lista de Produtos */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Produtos ({produtosFiltrados.length})</CardTitle>
+          <CardTitle className="flex items-center gap-2">
+            <Upload className="h-5 w-5" />
+            Upload de Planilha
+          </CardTitle>
           <CardDescription>
-            Lista completa de produtos com status de estoque
+            Faça upload da sua planilha de estoque para atualizar os dados
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {produtosFiltrados.length === 0 ? (
-            <div className="text-center py-8">
-              <Package className="mx-auto h-12 w-12 text-gray-400 mb-4" />
+          <div
+            className={`border-2 border-dashed rounded-lg p-8 text-center transition-colors ${
+              dragActive 
+                ? 'border-teal-500 bg-teal-50' 
+                : 'border-gray-300 hover:border-gray-400'
+            }`}
+            onDragEnter={handleDrag}
+            onDragLeave={handleDrag}
+            onDragOver={handleDrag}
+            onDrop={handleDrop}
+          >
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".xlsx,.xls"
+              onChange={handleFileSelect}
+              className="hidden"
+            />
+            
+            <FileSpreadsheet className="mx-auto h-12 w-12 text-gray-400 mb-4" />
+            
+            <div className="space-y-2">
+              <p className="text-lg font-medium">
+                Arraste e solte sua planilha aqui
+              </p>
               <p className="text-gray-500">
-                {produtos.length === 0 
-                  ? 'Nenhum produto encontrado no banco de dados.'
-                  : 'Nenhum produto corresponde aos filtros aplicados.'
-                }
+                ou clique para selecionar um arquivo
               </p>
             </div>
-          ) : (
-            <div className="space-y-3">
-              {produtosFiltrados.map((produto) => {
-                const statusConfig = STATUS_CONFIG[produto.status]
-                const StatusIcon = statusConfig.icon
+            
+            <Button 
+              onClick={openFileDialog}
+              disabled={uploading}
+              className="mt-4"
+            >
+              {uploading ? 'Processando...' : 'Selecionar Arquivo'}
+            </Button>
+            
+            <p className="text-xs text-gray-400 mt-4">
+              Formatos aceitos: .xlsx, .xls
+            </p>
+          </div>
 
-                return (
-                  <div key={produto.id} className="border rounded-lg p-4 hover:bg-gray-50 transition-colors">
-                    <div className="flex items-start justify-between">
-                      <div className="flex-1">
-                        <div className="flex items-center gap-3 mb-2">
-                          <span className="font-semibold text-lg">{produto.codigo}</span>
-                          <Badge className={statusConfig.color}>
-                            <StatusIcon className={`h-3 w-3 mr-1 ${statusConfig.iconColor}`} />
-                            {statusConfig.label}
-                          </Badge>
-                          {produto.sugestao_compra > 0 && (
-                            <Badge variant="outline" className="text-blue-600 border-blue-200">
-                              Comprar: {produto.sugestao_compra}
-                            </Badge>
-                          )}
-                        </div>
-                        
-                        <p className="text-gray-700 mb-3">{produto.descricao}</p>
-                        
-                        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">
-                          <div>
-                            <span className="text-gray-500">Disponível:</span>
-                            <div className="font-medium">{produto.disponivel}</div>
-                          </div>
-                          <div>
-                            <span className="text-gray-500">A caminho:</span>
-                            <div className="font-medium">{produto.a_caminho}</div>
-                          </div>
-                          <div>
-                            <span className="text-gray-500">Total:</span>
-                            <div className="font-bold text-lg">{produto.estoque_total}</div>
-                          </div>
-                          <div>
-                            <span className="text-gray-500">Nível mínimo:</span>
-                            <div className="font-medium">{produto.nivel_minimo}</div>
-                          </div>
-                          <div className="flex items-center">
-                            <Dialog>
-                              <DialogTrigger asChild>
-                                <Button 
-                                  variant="outline" 
-                                  size="sm"
-                                  onClick={() => {
-                                    setProdutoEditando(produto)
-                                    setNovoNivelMinimo(produto.nivel_minimo.toString())
-                                  }}
-                                >
-                                  <Settings className="h-4 w-4 mr-1" />
-                                  Configurar
-                                </Button>
-                              </DialogTrigger>
-                              <DialogContent>
-                                <DialogHeader>
-                                  <DialogTitle>Configurar Produto</DialogTitle>
-                                  <DialogDescription>
-                                    Ajuste o nível mínimo de estoque para {produto.codigo}
-                                  </DialogDescription>
-                                </DialogHeader>
-                                <div className="space-y-4">
-                                  <div>
-                                    <Label htmlFor="nivel-minimo">Nível Mínimo</Label>
-                                    <Input
-                                      id="nivel-minimo"
-                                      type="number"
-                                      value={novoNivelMinimo}
-                                      onChange={(e) => setNovoNivelMinimo(e.target.value)}
-                                      placeholder="Digite o nível mínimo"
-                                    />
-                                  </div>
-                                </div>
-                                <DialogFooter>
-                                  <Button variant="outline" onClick={() => setProdutoEditando(null)}>
-                                    Cancelar
-                                  </Button>
-                                  <Button onClick={atualizarNivelMinimo}>
-                                    Salvar
-                                  </Button>
-                                </DialogFooter>
-                              </DialogContent>
-                            </Dialog>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
+          {message && (
+            <Alert className={`mt-4 ${message.type === 'error' ? 'border-red-200' : 'border-green-200'}`}>
+              {message.type === 'error' ? (
+                <AlertCircle className="h-4 w-4 text-red-600" />
+              ) : (
+                <CheckCircle className="h-4 w-4 text-green-600" />
+              )}
+              <AlertDescription className={message.type === 'error' ? 'text-red-700' : 'text-green-700'}>
+                {message.text}
+              </AlertDescription>
+            </Alert>
           )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Formato da Planilha</CardTitle>
+          <CardDescription>
+            Sua planilha deve conter as seguintes colunas obrigatórias:
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <h4 className="font-medium">Colunas Obrigatórias:</h4>
+              <ul className="text-sm space-y-1 text-gray-600">
+                <li>• <strong>Produto</strong> - Código do produto</li>
+                <li>• <strong>Descrição do produto</strong> - Nome/descrição</li>
+                <li>• <strong>Disponível</strong> - Quantidade em estoque</li>
+                <li>• <strong>A caminho</strong> - Quantidade em trânsito</li>
+              </ul>
+            </div>
+            <div className="space-y-2">
+              <h4 className="font-medium">Observações:</h4>
+              <ul className="text-sm space-y-1 text-gray-600">
+                <li>• Os dados existentes serão substituídos</li>
+                <li>• Valores numéricos devem ser números inteiros</li>
+                <li>• Linhas vazias serão ignoradas</li>
+                <li>• O nível mínimo será definido como 5 por padrão</li>
+              </ul>
+            </div>
+          </div>
         </CardContent>
       </Card>
     </div>
