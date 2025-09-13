@@ -180,7 +180,7 @@ export default function Produtos() {
               <Package className="mx-auto h-12 w-12 text-gray-400 mb-4" />
               <p className="text-gray-500">
                 {produtos.length === 0 
-                  ? 'Nenhum produto encontrado. Faça upload de uma planilha primeiro.'
+                  ? 'Nenhum produto encontrado no banco de dados.'
                   : 'Nenhum produto corresponde aos filtros aplicados.'
                 }
               </p>
@@ -285,4 +285,3 @@ export default function Produtos() {
     </div>
   )
 }
-
